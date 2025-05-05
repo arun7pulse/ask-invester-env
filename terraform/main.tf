@@ -13,7 +13,9 @@ resource "aws_subnet" "public" {
 }
 
 resource "aws_security_group" "ecs_sg" {
-  vpc_id = aws_vpc.main.id
+  name        = "ecs-sg"
+  description = "Allow inbound traffic"
+  vpc_id      = aws_vpc.main.id
 
   ingress {
     from_port   = 5000
@@ -30,34 +32,14 @@ resource "aws_security_group" "ecs_sg" {
   }
 }
 
-resource "aws_ecs_cluster" "cluster" {
+resource "aws_ecs_cluster" "app_cluster" {
   name = "python-redis-cluster"
-}
-
-resource "aws_iam_role" "ecs_task_execution_role" {
-  name = "ecsTaskExecutionRole"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action = "sts:AssumeRole"
-      Effect = "Allow"
-      Principal = {
-        Service = "ecs-tasks.amazonaws.com"
-      }
-    }]
-  })
-}
-
-resource "aws_iam_role_policy_attachment" "ecs_task_execution_role_policy" {
-  role       = aws_iam_role.ecs_task_execution_role.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
 }
 
 resource "aws_ecs_task_definition" "python_redis_task" {
   family                   = "python-redis-task"
-  network_mode             = "awsvpc"
   requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
   cpu                      = "256"
   memory                   = "512"
   execution_role_arn       = aws_iam_role.ecs_task_execution_role.arn
@@ -65,35 +47,71 @@ resource "aws_ecs_task_definition" "python_redis_task" {
   container_definitions = jsonencode([
     {
       name      = "redis"
-      image     = "redis:latest"
+      image     = "redis:7"
       essential = true
-      portMappings = [{
-        containerPort = 6379
-      }]
+      portMappings = [
+        {
+          containerPort = 6379
+          hostPort      = 6379
+        }
+      ]
     },
     {
-      name      = "app"
+      name      = "python-app"
       image     = var.app_image
       essential = true
-      portMappings = [{
-        containerPort = 5000
-      }],
-      links = ["redis"]
+      portMappings = [
+        {
+          containerPort = 5000
+          hostPort      = 5000
+        }
+      ]
+      environment = [
+        {
+          name  = "REDIS_HOST"
+          value = "127.0.0.1"
+        },
+        {
+          name  = "REDIS_PORT"
+          value = "6379"
+        }
+      ]
     }
   ])
 }
 
-resource "aws_ecs_service" "python_redis_service" {
+resource "aws_iam_role" "ecs_task_execution_role" {
+  name = "ecsTaskExecutionRole"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ecs-tasks.amazonaws.com"
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_execution_role_policy" {
+  role       = aws_iam_role.ecs_task_execution_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+resource "aws_ecs_service" "app_service" {
   name            = "python-redis-service"
-  cluster         = aws_ecs_cluster.cluster.id
+  cluster         = aws_ecs_cluster.app_cluster.id
   task_definition = aws_ecs_task_definition.python_redis_task.arn
   launch_type     = "FARGATE"
+  desired_count   = 1
 
   network_configuration {
     subnets          = [aws_subnet.public.id]
-    assign_public_ip = true
     security_groups  = [aws_security_group.ecs_sg.id]
+    assign_public_ip = true
   }
-
-  desired_count = 1
 }
